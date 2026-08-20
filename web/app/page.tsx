@@ -62,6 +62,8 @@ export default function Home() {
   const [echoInput, setEchoInput] = useState('Fastify WebSocket Echo 连通性测试验证');
   const [echoResult, setEchoResult] = useState('');
   const [echoSent, setEchoSent] = useState('');
+  const [echoRtt, setEchoRtt] = useState<number | null>(null);
+  const [echoCount, setEchoCount] = useState(0);
 
   // 任务 B/C：语音
   const [recording, setRecording] = useState(false);
@@ -86,6 +88,7 @@ export default function Home() {
   const audioChunksRef = useRef<BlobPart[]>([]);
   const audioFormatRef = useRef('mp3');
   const echoExpectRef = useRef('');
+  const echoSentAtRef = useRef(0);
   const reconnectRef = useRef(0);
   const closedByUserRef = useRef(false);
 
@@ -150,6 +153,21 @@ export default function Home() {
 
       ws.onmessage = (ev) => {
         if (typeof ev.data === 'string') {
+          // 正在等待 Echo 响应：收到的第一个文本帧，无论是什么都作为响应完整展示
+          if (echoExpectRef.current !== '') {
+            const expected = echoExpectRef.current;
+            echoExpectRef.current = '';
+            const rtt = Math.round(performance.now() - echoSentAtRef.current);
+            setEchoRtt(rtt);
+            setEchoResult(ev.data);
+            if (ev.data === expected) {
+              log(`[Echo] 收到响应（RTT ${rtt}ms）：内容一致`, 'ok');
+            } else {
+              // 协议响应（如 ping→pong）也如实展示，让客户看到服务端真实返回
+              log(`[Echo] 收到响应（RTT ${rtt}ms）：${ev.data}`);
+            }
+            return;
+          }
           let msg: any;
           let isEcho = false;
           try {
@@ -161,12 +179,7 @@ export default function Home() {
             isEcho = true;
           }
           if (isEcho) {
-            if (ev.data === echoExpectRef.current) {
-              setEchoResult(ev.data);
-              log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
-            } else {
-              log(`[Echo] 收到未知文本消息：${ev.data}`);
-            }
+            log(`[Echo] 收到未知文本消息：${ev.data}`);
             return;
           }
           const now = Date.now();
@@ -262,9 +275,12 @@ export default function Home() {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     echoExpectRef.current = echoInput;
+    echoSentAtRef.current = performance.now();
     ws.send(echoInput);
     setEchoResult('');
+    setEchoRtt(null);
     setEchoSent(echoInput);
+    setEchoCount((c) => c + 1);
     log(`[Echo] 已发送：${echoInput}`);
   };
 
@@ -570,7 +586,7 @@ export default function Home() {
         <section className="studio-card" aria-label="WebSocket Echo 测试">
           <h2 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px' }}>WebSocket Echo 测试</h2>
           <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-            向服务端发送文本，验证原样返回。
+            输入任意文本发送到服务端，验证原样返回。可输入普通文本、数字、JSON、特殊字符。
           </p>
           <div className="echo-pane">
             <input
@@ -578,27 +594,32 @@ export default function Home() {
               className="text-field"
               value={echoInput}
               onChange={(e) => setEchoInput(e.target.value)}
-              placeholder="输入测试文本"
+              placeholder="输入任意内容测试（文本 / JSON / 特殊字符均可）"
             />
             <button className="action-btn" onClick={sendEcho} disabled={wsState !== 'open'}>
               发送
             </button>
           </div>
-          {/* 发送 / 返回 对照（像聊天记录一样上下两条） */}
+
+          {/* 发送 / 返回 对照（像聊天记录一样上下两条，含 RTT） */}
           {echoSent && (
             <div className="message-card user" style={{ marginTop: '16px' }}>
               <div className="avatar-badge user-badge">发</div>
               <div className="message-body">
                 <div className="message-meta">
-                  <span className="message-sender">已发送</span>
+                  <span className="message-sender">已发送{echoCount > 0 ? ` #${echoCount}` : ''}</span>
                   <span className="message-tag">WebSocket →</span>
                 </div>
-                <div className="message-text" style={{ fontFamily: 'var(--font-mono)' }}>{echoSent}</div>
+                <div className="message-text" style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+                  {echoSent}
+                </div>
               </div>
             </div>
           )}
           {echoResult && echoSent && (
-            <div className="echo-arrow" aria-hidden="true">↓ 服务端原样返回</div>
+            <div className="echo-arrow" aria-hidden="true">
+              ↓ 服务端响应 · 往返 {echoRtt !== null ? `${echoRtt} ms` : '...'}
+            </div>
           )}
           {echoResult && (
             <div className="message-card assistant" style={{ marginTop: '0' }}>
@@ -606,9 +627,18 @@ export default function Home() {
               <div className="message-body">
                 <div className="message-meta">
                   <span className="message-sender">服务端返回</span>
-                  <span className="message-tag" style={{ color: 'var(--success)' }}>内容一致</span>
+                  <span
+                    className="message-tag"
+                    style={{
+                      color: echoResult === echoSent ? 'var(--success)' : 'var(--warning)',
+                    }}
+                  >
+                    {echoResult === echoSent ? '内容一致' : '协议响应'}
+                  </span>
                 </div>
-                <div className="message-text" style={{ fontFamily: 'var(--font-mono)' }}>{echoResult}</div>
+                <div className="message-text" style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+                  {echoResult}
+                </div>
               </div>
             </div>
           )}
