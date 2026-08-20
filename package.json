@@ -1,0 +1,17 @@
+{
+  "name": "voice-poc",
+  "private": true,
+  "version": "1.0.0",
+  "description": "语音 AI 链路 PoC：Next.js 14 + Fastify + WebSocket + Whisper STT + LLM + ElevenLabs 流式 TTS",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "setup": "npm install && npm --prefix server install && npm --prefix web install",
+    "dev": "concurrently -n server,web -c blue,magenta \"npm --prefix server run dev\" \"npm --prefix web run dev\"",
+    "smoke": "npm --prefix server run smoke"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
