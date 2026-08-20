@@ -69,7 +69,7 @@ npm run smoke
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI 兼容的 LLM 服务（阿里云百炼 / DeepSeek / OpenAI / Moonshot 等） |
 | `STT_PROVIDER` | `openai`=标准 Whisper 接口（Groq / OpenAI）；`qwen-asr`=百炼 Qwen-ASR |
 | `WHISPER_BASE_URL` / `WHISPER_API_KEY` / `WHISPER_MODEL` | 语音转写服务（与 STT_PROVIDER 配套） |
-| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` | ElevenLabs TTS（可选，未配置时任务 C 自动跳过） |
+| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` | ElevenLabs TTS（可选，未配置时任务 C 自动跳过）⚠️ 免费档 API 只能用账号 premade 声音（如 Sarah `EXAVITQu4vr4xnSDxMaL`），声音库第三方声音需付费档 |
 
 ## 设计要点
 
