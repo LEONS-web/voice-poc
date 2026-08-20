@@ -42,7 +42,8 @@ npm run setup
 # 2. 配置环境变量
 cd server
 cp .env.example .env       # Windows: copy .env.example .env
-# 无密钥时设 MOCK_AI=1 可先跑通全链路；有密钥时填入并设 MOCK_AI=0
+# 已内置演示用 API key（百炼 / ElevenLabs 免费额度），无需额外申请即可运行真实链路；
+# 如需改用自己的账号，直接编辑 .env 替换即可；无任何 key 时设 MOCK_AI=1 可跑模拟模式
 
 # 3. 启动前后端（根目录执行）
 npm run dev
