@@ -74,6 +74,8 @@ export default function Home() {
   // 麦克风设备选择：浏览器默认设备可能与系统默认不一致，允许手动选择
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedMic, setSelectedMic] = useState('');
+  // 运行日志折叠状态
+  const [logsCollapsed, setLogsCollapsed] = useState(false);
 
   // Telemetry 性能耗时指标
   const [telemetry, setTelemetry] = useState<Telemetry>({});
@@ -537,27 +539,27 @@ export default function Home() {
             </div>
           )}
 
-          {/* 延迟指标 */}
-          {telemetry.total !== undefined && (
-            <div className="telemetry-strip" aria-label="各阶段耗时">
-              <div className="telemetry-col">
-                <span className="telemetry-label">转写耗时</span>
-                <span className="telemetry-value">{telemetry.stt ?? '-'} ms</span>
-              </div>
-              <div className="telemetry-col">
-                <span className="telemetry-label">回复耗时</span>
-                <span className="telemetry-value">{telemetry.llm ?? '-'} ms</span>
-              </div>
-              <div className="telemetry-col">
-                <span className="telemetry-label">合成耗时</span>
-                <span className="telemetry-value">{telemetry.tts ?? '-'} ms</span>
-              </div>
-              <div className="telemetry-col">
-                <span className="telemetry-label">端到端延迟</span>
-                <span className="telemetry-value" style={{ color: 'var(--success)' }}>{telemetry.total} ms</span>
-              </div>
+          {/* 延迟指标（常驻看板） */}
+          <div className="telemetry-strip" aria-label="各阶段耗时">
+            <div className="telemetry-col">
+              <span className="telemetry-label">转写耗时</span>
+              <span className="telemetry-value">{telemetry.stt ?? '--'} ms</span>
             </div>
-          )}
+            <div className="telemetry-col">
+              <span className="telemetry-label">回复耗时</span>
+              <span className="telemetry-value">{telemetry.llm ?? '--'} ms</span>
+            </div>
+            <div className="telemetry-col">
+              <span className="telemetry-label">合成耗时</span>
+              <span className="telemetry-value">{telemetry.tts ?? '--'} ms</span>
+            </div>
+            <div className="telemetry-col">
+              <span className="telemetry-label">端到端延迟</span>
+              <span className={`telemetry-value ${telemetry.total !== undefined ? 'done' : ''}`}>
+                {telemetry.total ?? '--'} ms
+              </span>
+            </div>
+          </div>
         </section>
       )}
 
@@ -594,13 +596,27 @@ export default function Home() {
         </section>
       )}
 
-      {/* 运行日志 */}
+      {/* 运行日志（可折叠） */}
       <footer className="terminal-block">
-        <div className="terminal-header">
+        <div
+          className="terminal-header"
+          onClick={() => setLogsCollapsed((c) => !c)}
+          role="button"
+          aria-expanded={!logsCollapsed}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setLogsCollapsed((c) => !c);
+            }
+          }}
+        >
           <span className="terminal-title">运行日志</span>
-          <span style={{ fontSize: '11px', color: '#475569' }}>{logs.length} 条</span>
+          <span className="terminal-toggle">
+            {logsCollapsed ? '展开 ▸' : '收起 ▾'} · {logs.length} 条
+          </span>
         </div>
-        <div className="terminal-feed">
+        <div className={`terminal-feed ${logsCollapsed ? 'collapsed' : ''}`}>
           {logs.length === 0 ? (
             <div style={{ color: '#475569' }}>暂无日志</div>
           ) : (
