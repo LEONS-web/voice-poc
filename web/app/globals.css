@@ -425,6 +425,14 @@ body {
   margin-top: 14px;
 }
 
+.echo-arrow {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 10px 0 4px;
+  font-family: var(--font-mono);
+}
+
 .text-field {
   flex: 1;
   background: var(--surface-sunken);

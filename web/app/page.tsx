@@ -61,6 +61,7 @@ export default function Home() {
   // 任务 A：Echo
   const [echoInput, setEchoInput] = useState('Fastify WebSocket Echo 连通性测试验证');
   const [echoResult, setEchoResult] = useState('');
+  const [echoSent, setEchoSent] = useState('');
 
   // 任务 B/C：语音
   const [recording, setRecording] = useState(false);
@@ -263,6 +264,7 @@ export default function Home() {
     echoExpectRef.current = echoInput;
     ws.send(echoInput);
     setEchoResult('');
+    setEchoSent(echoInput);
     log(`[Echo] 已发送：${echoInput}`);
   };
 
@@ -582,12 +584,29 @@ export default function Home() {
               发送
             </button>
           </div>
+          {/* 发送 / 返回 对照（像聊天记录一样上下两条） */}
+          {echoSent && (
+            <div className="message-card user" style={{ marginTop: '16px' }}>
+              <div className="avatar-badge user-badge">发</div>
+              <div className="message-body">
+                <div className="message-meta">
+                  <span className="message-sender">已发送</span>
+                  <span className="message-tag">WebSocket →</span>
+                </div>
+                <div className="message-text" style={{ fontFamily: 'var(--font-mono)' }}>{echoSent}</div>
+              </div>
+            </div>
+          )}
+          {echoResult && echoSent && (
+            <div className="echo-arrow" aria-hidden="true">↓ 服务端原样返回</div>
+          )}
           {echoResult && (
-            <div className="message-card" style={{ marginTop: '16px' }}>
+            <div className="message-card assistant" style={{ marginTop: '0' }}>
+              <div className="avatar-badge ai-badge">收</div>
               <div className="message-body">
                 <div className="message-meta">
                   <span className="message-sender">服务端返回</span>
-                  <span className="message-tag" style={{ color: 'var(--success)' }}>一致</span>
+                  <span className="message-tag" style={{ color: 'var(--success)' }}>内容一致</span>
                 </div>
                 <div className="message-text" style={{ fontFamily: 'var(--font-mono)' }}>{echoResult}</div>
               </div>
