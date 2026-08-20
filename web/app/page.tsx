@@ -9,9 +9,9 @@ type LogLine = { time: string; text: string; kind?: 'err' | 'ok' };
 
 type Telemetry = { stt?: number; llm?: number; tts?: number; total?: number };
 
-// ---------- 录音编码工具：webm → 16kHz 单声道 WAV ----------
-// 百炼 Qwen-ASR 对 WAV 格式支持最稳定；浏览器 MediaRecorder 输出 webm，
-// 这里用 Web Audio API 解码后重新编码为 WAV，保证服务端识别兼容性。
+// ---------- 录音编码工具：PCM → 16kHz 单声道 WAV ----------
+// 直接用 Web Audio API 采集原始 PCM 样本并封装 WAV，绕开 MediaRecorder/webm 的浏览器格式兼容性问题，
+// 确保百炼 Qwen-ASR 一定能拿到有效音频。
 function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   const buf = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buf);
@@ -38,29 +38,20 @@ function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   return buf;
 }
 
-async function blobToWav(blob: Blob): Promise<Blob | null> {
-  try {
-    const arrayBuf = await blob.arrayBuffer();
-    const ctx = new AudioContext({ sampleRate: 16000 });
-    const decoded = await ctx.decodeAudioData(arrayBuf);
-    await ctx.close();
-    // 混音为单声道
-    const ch0 = decoded.getChannelData(0);
-    const mono =
-      decoded.numberOfChannels === 1
-        ? ch0
-        : (() => {
-            const out = new Float32Array(decoded.length);
-            for (let c = 0; c < decoded.numberOfChannels; c++) {
-              const d = decoded.getChannelData(c);
-              for (let i = 0; i < d.length; i++) out[i] += d[i] / decoded.numberOfChannels;
-            }
-            return out;
-          })();
-    return new Blob([encodeWav(mono, decoded.sampleRate)], { type: 'audio/wav' });
-  } catch {
-    return null;
+// 线性插值重采样到 16kHz（百炼 ASR 对 16k 单声道 WAV 支持最稳定）
+function resampleTo16k(samples: Float32Array, fromRate: number): Float32Array {
+  if (fromRate === 16000) return samples;
+  const ratio = 16000 / fromRate;
+  const outLen = Math.floor(samples.length * ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i / ratio;
+    const i0 = Math.floor(pos);
+    const i1 = Math.min(i0 + 1, samples.length - 1);
+    const frac = pos - i0;
+    out[i] = samples[i0] * (1 - frac) + samples[i1] * frac;
   }
+  return out;
 }
 
 export default function Home() {
@@ -86,7 +77,6 @@ export default function Home() {
   const timerRef = useRef<{ start?: number; stt?: number; llm?: number; tts?: number }>({});
 
   const wsRef = useRef<WebSocket | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
   const audioFormatRef = useRef('mp3');
   const echoExpectRef = useRef('');
@@ -240,16 +230,37 @@ export default function Home() {
     timerRef.current = {};
 
     try {
+      // 用 Web Audio API 直接采集 PCM，绕开 MediaRecorder/webm 的浏览器格式兼容问题
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
-      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-      recorderRef.current = recorder;
-      const chunks: BlobPart[] = [];
-      recorder.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data);
+      const audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(stream);
+      // ScriptProcessor 采集原始样本（16 位 PCM 由 WAV 封装保证兼容性）
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const samples: Float32Array[] = [];
+      let peakLevel = 0;
 
-      recorder.start();
+      processor.onaudioprocess = (e) => {
+        const data = e.inputBuffer.getChannelData(0);
+        samples.push(new Float32Array(data));
+        for (let i = 0; i < data.length; i++) {
+          const abs = Math.abs(data[i]);
+          if (abs > peakLevel) peakLevel = abs;
+        }
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+      // 使用独立引用，便于停止时释放
+      const cleanup = () => {
+        try {
+          source.disconnect();
+          processor.disconnect();
+          stream.getTracks().forEach((t) => t.stop());
+          void audioCtx.close();
+        } catch { /* 忽略清理异常 */ }
+      };
+
       setRecording(true);
-      log(`开始录音（${RECORD_SECONDS} 秒）`);
+      log(`开始录音（${RECORD_SECONDS} 秒）…`);
 
       let remain = RECORD_SECONDS;
       const timer = setInterval(() => {
@@ -259,21 +270,31 @@ export default function Home() {
       }, 1000);
 
       setTimeout(() => {
-        recorder.stop();
+        cleanup();
         setRecording(false);
-        recorder.onstop = async () => {
-          stream.getTracks().forEach((t) => t.stop());
-          const blob = new Blob(chunks, { type: mime || 'audio/webm' });
-          log(`录音完成（${(blob.size / 1024).toFixed(1)} KB），正在转码…`);
 
-          const wav = await blobToWav(blob);
-          const payload = wav ?? blob;
-          const payloadMime = wav ? 'audio/wav' : mime || 'audio/webm';
+        // 拼接 PCM 样本 → 重采样 16kHz → WAV
+        const totalLen = samples.reduce((s, c) => s + c.length, 0);
+        const merged = new Float32Array(totalLen);
+        let offset = 0;
+        for (const c of samples) {
+          merged.set(c, offset);
+          offset += c.length;
+        }
+        // 计算有效音量：几乎全静音说明麦克风没拾到音
+        let rms = 0;
+        for (let i = 0; i < merged.length; i++) rms += merged[i] * merged[i];
+        rms = Math.sqrt(rms / Math.max(1, merged.length));
+        log(
+          `录音完成（${(merged.length / 16000).toFixed(1)} 秒 / ${(totalLen * 2 / 1024).toFixed(1)}KB，峰值 ${(peakLevel * 100).toFixed(0)}%）` +
+          (rms < 0.005 ? '，⚠️ 几乎无声，请检查麦克风是否被占用' : '')
+        );
 
-          ws.send(JSON.stringify({ type: 'audio', mime: payloadMime }));
-          ws.send(await payload.arrayBuffer());
-          log('音频已发送，等待处理结果…');
-        };
+        const wav16k = resampleTo16k(merged, audioCtx.sampleRate);
+        const wavBytes = encodeWav(wav16k, 16000);
+        ws.send(JSON.stringify({ type: 'audio', mime: 'audio/wav' }));
+        ws.send(wavBytes);
+        log('音频已发送，等待处理结果…');
       }, RECORD_SECONDS * 1000);
     } catch (err) {
       log(`录音失败：${err instanceof Error ? err.message : String(err)}（请检查麦克风权限）`, 'err');
