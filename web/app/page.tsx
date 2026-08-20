@@ -129,7 +129,7 @@ export default function Home() {
         if (isEcho) {
           if (ev.data === echoExpectRef.current) {
             setEchoResult(ev.data);
-            log(`[Echo 响应] 服务端原样回显: "${ev.data}"`, 'ok');
+            log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
           } else {
             log(`[Echo] 收到未知文本消息：${ev.data}`);
           }
@@ -141,33 +141,33 @@ export default function Home() {
             if (msg.stage === 'stt') {
               setStage('stt');
               timerRef.current.start = now;
-              log('[Pipeline] 启动语音转写 (Whisper STT)...');
+              log('[流程] 开始语音转写…');
             } else if (msg.stage === 'llm') {
               setStage('llm');
               const cost = now - (timerRef.current.start || now);
               timerRef.current.stt = cost;
               setTelemetry((t) => ({ ...t, stt: cost }));
-              log(`[Pipeline] STT 完成 (${cost}ms)，进入智能推理 (LLM)...`);
+              log(`[流程] 转写完成（${cost}ms），生成回复…`);
             } else if (msg.stage === 'tts') {
               setStage('tts');
               const cost = now - (timerRef.current.start || now) - (timerRef.current.stt || 0);
               timerRef.current.llm = cost;
               setTelemetry((t) => ({ ...t, llm: cost }));
-              log(`[Pipeline] LLM 完成 (${cost}ms)，进入流式语音合成 (ElevenLabs)...`);
+              log(`[流程] 回复完成（${cost}ms），合成语音…`);
             }
             break;
           case 'transcript':
             setTranscript(msg.text);
-            log(`[转写结果] "${msg.text}"`, 'ok');
+            log(`[转写] ${msg.text}`, 'ok');
             break;
           case 'reply':
             setReply(msg.text);
-            log(`[LLM 回复] "${msg.text}"`, 'ok');
+            log(`[回复] ${msg.text}`, 'ok');
             break;
           case 'audio_start':
             audioFormatRef.current = msg.format ?? 'mp3';
             audioChunksRef.current = [];
-            log(`[TTS 传输] 接收流式音频分块 (${msg.format})`);
+            log(`[合成] 开始接收音频（${msg.format}）`);
             break;
           case 'audio_end': {
             const ttsCost =
@@ -176,26 +176,26 @@ export default function Home() {
             timerRef.current.tts = ttsCost;
             setTelemetry((t) => ({ ...t, tts: ttsCost, total: totalCost }));
             finishAudio();
-            log(`[TTS 完成] 全链路耗时 ${totalCost}ms`, 'ok');
+            log(`[合成] 音频接收完成，端到端耗时 ${totalCost}ms`, 'ok');
             break;
           }
           case 'audio_skipped':
-            log(`[TTS 跳过] ${msg.reason}`);
+            log(`[合成] 已跳过：${msg.reason}`);
             break;
           case 'done':
             setBusy(false);
             setStage('idle');
-            log('[Pipeline] 会话完成', 'ok');
+            log('[流程] 处理完成', 'ok');
             break;
           case 'error':
-            log(`[服务端报错] ${msg.message}`, 'err');
+            log(`[错误] ${msg.message}`, 'err');
             setBusy(false);
             setStage('idle');
             break;
           default:
             // 防御：未知 JSON 控制消息也按 Echo 展示
             setEchoResult(ev.data);
-            log(`[Echo 响应] ${ev.data}`, 'ok');
+            log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
         }
       } else {
         // 二进制帧 = TTS 音频块
@@ -222,7 +222,7 @@ export default function Home() {
     echoExpectRef.current = echoInput;
     ws.send(echoInput);
     setEchoResult('');
-    log(`[Echo 发送] "${echoInput}"`);
+    log(`[Echo] 已发送：${echoInput}`);
   };
 
   // ---------- 任务 B：录音 3 秒 → STT → LLM（→ TTS） ----------
@@ -249,7 +249,7 @@ export default function Home() {
 
       recorder.start();
       setRecording(true);
-      log(`[麦克风] 开启录音 (${RECORD_SECONDS} 秒倒计时)...`);
+      log(`开始录音（${RECORD_SECONDS} 秒）`);
 
       let remain = RECORD_SECONDS;
       const timer = setInterval(() => {
@@ -264,7 +264,7 @@ export default function Home() {
         recorder.onstop = async () => {
           stream.getTracks().forEach((t) => t.stop());
           const blob = new Blob(chunks, { type: mime || 'audio/webm' });
-          log(`[麦克风] 录音捕获 ${(blob.size / 1024).toFixed(1)} KB，转码 16kHz WAV...`);
+          log(`录音完成（${(blob.size / 1024).toFixed(1)} KB），正在转码…`);
 
           const wav = await blobToWav(blob);
           const payload = wav ?? blob;
@@ -272,11 +272,11 @@ export default function Home() {
 
           ws.send(JSON.stringify({ type: 'audio', mime: payloadMime }));
           ws.send(await payload.arrayBuffer());
-          log(`[WebSocket] 音频载荷发送完成，等待全链路响应...`);
+          log('音频已发送，等待处理结果…');
         };
       }, RECORD_SECONDS * 1000);
     } catch (err) {
-      log(`录音异常: ${err instanceof Error ? err.message : String(err)}（请检查麦克风权限）`, 'err');
+      log(`录音失败：${err instanceof Error ? err.message : String(err)}（请检查麦克风权限）`, 'err');
       setBusy(false);
       setStage('idle');
     }
@@ -295,14 +295,14 @@ export default function Home() {
             </svg>
           </div>
           <div>
-            <span className="brand-text">AuraVoice Studio</span>
-            <span className="brand-sub">PoC Milestone</span>
+            <span className="brand-text">语音 AI 链路 PoC</span>
+            <span className="brand-sub">竞标试做</span>
           </div>
         </div>
         <div className="conn-pill" role="status" aria-live="polite">
           <span className={`conn-dot ${wsState === 'open' ? 'active' : ''}`} />
           <span>
-            {wsState === 'open' ? 'WS 8787 Connected' : wsState === 'connecting' ? 'Connecting...' : 'Offline'}
+            {wsState === 'open' ? 'WebSocket 已连接' : wsState === 'connecting' ? '连接中' : '未连接'}
           </span>
         </div>
       </header>
@@ -319,7 +319,7 @@ export default function Home() {
             <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
             <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
           </svg>
-          <span>任务 B & C · 语音 AI 链路</span>
+          <span>语音对话（任务 B / C）</span>
         </button>
         <button
           role="tab"
@@ -330,13 +330,13 @@ export default function Home() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
           </svg>
-          <span>任务 A · WebSocket Echo</span>
+          <span>WebSocket Echo（任务 A）</span>
         </button>
       </nav>
 
       {/* 任务 B/C 主面板 */}
       {activeTab === 'voice' && (
-        <section className="studio-card" aria-label="语音对话面板">
+        <section className="studio-card" aria-label="语音对话">
           <div className="acoustic-stage">
             <div className="orb-container">
               {recording && <div className="sonic-ripple" />}
@@ -344,7 +344,7 @@ export default function Home() {
                 className={`orb-btn ${recording ? 'recording' : busy ? 'processing' : ''}`}
                 onClick={startVoice}
                 disabled={wsState !== 'open' || busy}
-                aria-label={recording ? '录音中' : '开始 3 秒语音对话'}
+                aria-label={recording ? '录音中' : '开始录音'}
                 title="点击开始录音 3 秒"
               >
                 {recording ? (
@@ -366,13 +366,13 @@ export default function Home() {
             </div>
             <div className="pipeline-status" aria-live="polite">
               <div className="pipeline-status-title">
-                {stage === 'recording' && '麦克风监听中 · 请说话'}
-                {stage === 'stt' && 'Whisper 正在转写音频流 (STT)...'}
-                {stage === 'llm' && 'Claude/LLM 正在生成回复...'}
-                {stage === 'tts' && 'ElevenLabs 正在流式合成语音 (TTS)...'}
-                {stage === 'idle' && (transcript ? '对话已就绪 · 点击可继续' : '点击声学球开启 3 秒全链路对话')}
+                {stage === 'recording' && '正在录音，请说话'}
+                {stage === 'stt' && '正在语音转写…'}
+                {stage === 'llm' && '正在生成回复…'}
+                {stage === 'tts' && '正在合成语音…'}
+                {stage === 'idle' && (transcript ? '对话完成，可继续录音' : '点击按钮开始录音（3 秒）')}
               </div>
-              <div className="pipeline-status-desc">16kHz 单声道 WAV 编码 · 实时 WebSocket 二进制分发</div>
+              <div className="pipeline-status-desc">录音 · 转写 · 回复 · 合成，全程经 WebSocket 传输</div>
             </div>
           </div>
 
@@ -381,11 +381,11 @@ export default function Home() {
             <div className="conversation-ledger">
               {transcript && (
                 <article className="message-card user">
-                  <div className="avatar-badge user-badge">YOU</div>
+                  <div className="avatar-badge user-badge">用户</div>
                   <div className="message-body">
                     <div className="message-meta">
-                      <span className="message-sender">用户语音转写</span>
-                      <span className="message-tag">Whisper ASR</span>
+                      <span className="message-sender">语音转写</span>
+                      <span className="message-tag">STT</span>
                     </div>
                     <p className="message-text">{transcript}</p>
                   </div>
@@ -393,11 +393,11 @@ export default function Home() {
               )}
               {reply && (
                 <article className="message-card assistant">
-                  <div className="avatar-badge ai-badge">AI</div>
+                  <div className="avatar-badge ai-badge">助手</div>
                   <div className="message-body">
                     <div className="message-meta">
-                      <span className="message-sender">智能语音回复</span>
-                      <span className="message-tag">LLM + ElevenLabs TTS</span>
+                      <span className="message-sender">AI 回复</span>
+                      <span className="message-tag">LLM / TTS</span>
                     </div>
                     <p className="message-text">{reply}</p>
                     {audioUrl && (
@@ -411,19 +411,19 @@ export default function Home() {
             </div>
           )}
 
-          {/* 延迟指标 Telemetry */}
+          {/* 延迟指标 */}
           {telemetry.total !== undefined && (
-            <div className="telemetry-strip" aria-label="延迟性能看板">
+            <div className="telemetry-strip" aria-label="各阶段耗时">
               <div className="telemetry-col">
-                <span className="telemetry-label">STT 耗时</span>
+                <span className="telemetry-label">转写耗时</span>
                 <span className="telemetry-value">{telemetry.stt ?? '-'} ms</span>
               </div>
               <div className="telemetry-col">
-                <span className="telemetry-label">LLM 耗时</span>
+                <span className="telemetry-label">回复耗时</span>
                 <span className="telemetry-value">{telemetry.llm ?? '-'} ms</span>
               </div>
               <div className="telemetry-col">
-                <span className="telemetry-label">TTS 耗时</span>
+                <span className="telemetry-label">合成耗时</span>
                 <span className="telemetry-value">{telemetry.tts ?? '-'} ms</span>
               </div>
               <div className="telemetry-col">
@@ -437,10 +437,10 @@ export default function Home() {
 
       {/* 任务 A Echo 面板 */}
       {activeTab === 'echo' && (
-        <section className="studio-card" aria-label="Echo 服务诊断">
-          <h2 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px' }}>任务 A · WebSocket 原样回显测试</h2>
+        <section className="studio-card" aria-label="WebSocket Echo 测试">
+          <h2 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px' }}>WebSocket Echo 测试</h2>
           <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-            通过 <code>/ws/voice</code> 文本信道进行全双工 Ping-Pong 与 Echo 传输校验。
+            向服务端发送文本，验证原样返回。
           </p>
           <div className="echo-pane">
             <input
@@ -448,18 +448,18 @@ export default function Home() {
               className="text-field"
               value={echoInput}
               onChange={(e) => setEchoInput(e.target.value)}
-              placeholder="输入测试文本..."
+              placeholder="输入测试文本"
             />
             <button className="action-btn" onClick={sendEcho} disabled={wsState !== 'open'}>
-              发送并断言
+              发送
             </button>
           </div>
           {echoResult && (
             <div className="message-card" style={{ marginTop: '16px' }}>
               <div className="message-body">
                 <div className="message-meta">
-                  <span className="message-sender">服务端返回内容</span>
-                  <span className="message-tag" style={{ color: 'var(--success)' }}>PASS 匹配</span>
+                  <span className="message-sender">服务端返回</span>
+                  <span className="message-tag" style={{ color: 'var(--success)' }}>一致</span>
                 </div>
                 <div className="message-text" style={{ fontFamily: 'var(--font-mono)' }}>{echoResult}</div>
               </div>
@@ -468,15 +468,15 @@ export default function Home() {
         </section>
       )}
 
-      {/* 底部 Telemetry 日志 */}
+      {/* 运行日志 */}
       <footer className="terminal-block">
         <div className="terminal-header">
-          <span className="terminal-title">实时工程事件日志 (Telemetry Feed)</span>
-          <span style={{ fontSize: '11px', color: '#475569' }}>{logs.length} 帧事件</span>
+          <span className="terminal-title">运行日志</span>
+          <span style={{ fontSize: '11px', color: '#475569' }}>{logs.length} 条</span>
         </div>
         <div className="terminal-feed">
           {logs.length === 0 ? (
-            <div style={{ color: '#475569' }}>等待连接建立与交互载荷...</div>
+            <div style={{ color: '#475569' }}>暂无日志</div>
           ) : (
             logs.map((l, i) => (
               <div key={i} className="feed-row">
