@@ -71,6 +71,9 @@ export default function Home() {
   const [audioUrl, setAudioUrl] = useState('');
   const [stage, setStage] = useState<'idle' | 'recording' | 'stt' | 'llm' | 'tts'>('idle');
   const [logs, setLogs] = useState<LogLine[]>([]);
+  // 麦克风设备选择：浏览器默认设备可能与系统默认不一致，允许手动选择
+  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedMic, setSelectedMic] = useState('');
 
   // Telemetry 性能耗时指标
   const [telemetry, setTelemetry] = useState<Telemetry>({});
@@ -86,6 +89,27 @@ export default function Home() {
   const log = useCallback((text: string, kind?: 'err' | 'ok') => {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     setLogs((prev) => [{ time, text, kind }, ...prev].slice(0, 100));
+  }, []);
+
+  // ---------- 枚举麦克风设备 ----------
+  useEffect(() => {
+    const loadDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const mics = devices.filter((d) => d.kind === 'audioinput');
+        setMicDevices(mics);
+        // 默认选中系统默认设备（label 为空的那个）
+        const def = mics.find((m) => m.deviceId === 'default') ?? mics[0];
+        if (def) setSelectedMic(def.deviceId);
+      } catch {
+        // 未授权前枚举可能失败，录音时再提示授权
+      }
+    };
+    void loadDevices();
+    // 授权后设备列表会刷新
+    const onChange = () => void loadDevices();
+    navigator.mediaDevices?.addEventListener?.('devicechange', onChange);
+    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', onChange);
   }, []);
 
   // ---------- WebSocket 连接（带自动重连） ----------
@@ -255,12 +279,24 @@ export default function Home() {
     timerRef.current = {};
 
     try {
-      // 用 Web Audio API 直接采集 PCM，绕开 MediaRecorder/webm 的浏览器格式兼容问题
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 用 Web Audio API 直接采集 PCM，绕开 MediaRecorder/webm 的浏览器格式兼容问题。
+      // 显式指定麦克风设备，避免浏览器默认设备与系统默认不一致导致录不到音。
+      const constraints: MediaStreamConstraints = {
+        audio: selectedMic
+          ? { deviceId: { exact: selectedMic }, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       const audioCtx = new AudioContext();
+      // 关键：Chrome 自动播放策略下 AudioContext 默认 suspended，
+      // 不 resume 则 onaudioprocess 不会触发，录到的样本为空。
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
       const source = audioCtx.createMediaStreamSource(stream);
       // ScriptProcessor 采集原始样本（16 位 PCM 由 WAV 封装保证兼容性）
       const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      // 静音增益节点：采集不向扬声器外放，避免回声/啸叫
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
       const samples: Float32Array[] = [];
       let peakLevel = 0;
 
@@ -273,12 +309,14 @@ export default function Home() {
         }
       };
       source.connect(processor);
-      processor.connect(audioCtx.destination);
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
       // 使用独立引用，便于停止时释放
       const cleanup = () => {
         try {
           source.disconnect();
           processor.disconnect();
+          silentGain.disconnect();
           stream.getTracks().forEach((t) => t.stop());
           void audioCtx.close();
         } catch { /* 忽略清理异常 */ }
@@ -398,6 +436,34 @@ export default function Home() {
       {activeTab === 'voice' && (
         <section className="studio-card" aria-label="语音对话">
           <div className="acoustic-stage">
+            {/* 麦克风设备选择（多个设备时显示） */}
+            {micDevices.length > 1 && (
+              <div style={{ marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label htmlFor="mic-select" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  麦克风
+                </label>
+                <select
+                  id="mic-select"
+                  value={selectedMic}
+                  onChange={(e) => setSelectedMic(e.target.value)}
+                  style={{
+                    background: 'var(--surface-sunken)',
+                    color: 'var(--text-main)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    padding: '6px 10px',
+                    fontSize: '12px',
+                    maxWidth: '320px',
+                  }}
+                >
+                  {micDevices.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label || `麦克风 ${d.deviceId.slice(0, 4)}…`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="orb-container">
               {recording && <div className="sonic-ripple" />}
               <button
