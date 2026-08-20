@@ -23,6 +23,7 @@ export default function Home() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
   const audioFormatRef = useRef('mp3');
+  const echoExpectRef = useRef('');
 
   const log = useCallback((text: string, kind?: 'err' | 'ok') => {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -46,7 +47,19 @@ export default function Home() {
 
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
-        const msg = JSON.parse(ev.data);
+        let msg: any;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          // 非 JSON 文本 = 任务 A 的 echo 原样回包
+          if (ev.data === echoExpectRef.current) {
+            setEchoResult(ev.data);
+            log('[Echo] 服务端原样返回，内容一致', 'ok');
+          } else {
+            log(`收到未知文本消息：${ev.data}`);
+          }
+          return;
+        }
         switch (msg.type) {
           case 'transcript':
             setTranscript(msg.text);
@@ -108,17 +121,9 @@ export default function Home() {
   const sendEcho = () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    echoExpectRef.current = echoInput;
     ws.send(echoInput);
     log(`[Echo] 已发送：${echoInput}`);
-    // 原样回传的内容直接显示（非 JSON 的文本帧即为 echo 回包）
-    const onRaw = (ev: MessageEvent) => {
-      if (typeof ev.data === 'string' && ev.data === echoInput) {
-        setEchoResult(ev.data);
-        log('[Echo] 服务端原样返回，内容一致', 'ok');
-        ws.removeEventListener('message', onRaw);
-      }
-    };
-    ws.addEventListener('message', onRaw);
   };
 
   // ---------- 任务 B：录音 3 秒 → STT → LLM（→ TTS） ----------

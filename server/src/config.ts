@@ -10,6 +10,9 @@ export const env = {
       '你是一个友好的语音陪聊助手，请用简短、口语化的一两句话回答用户。',
   },
   stt: {
+    // provider: 'openai' = 标准 /audio/transcriptions 接口（Groq/OpenAI）
+    //           'qwen-asr' = 百炼 Qwen-ASR（走 chat completions + input_audio）
+    provider: (process.env.STT_PROVIDER ?? 'openai') as 'openai' | 'qwen-asr',
     baseUrl: process.env.WHISPER_BASE_URL ?? 'https://api.groq.com/openai/v1',
     apiKey: process.env.WHISPER_API_KEY ?? '',
     model: process.env.WHISPER_MODEL ?? 'whisper-large-v3',
