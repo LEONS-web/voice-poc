@@ -80,120 +80,145 @@ export default function Home() {
   const audioChunksRef = useRef<BlobPart[]>([]);
   const audioFormatRef = useRef('mp3');
   const echoExpectRef = useRef('');
-  const wsOpenRef = useRef(false);
+  const reconnectRef = useRef(0);
+  const closedByUserRef = useRef(false);
 
   const log = useCallback((text: string, kind?: 'err' | 'ok') => {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     setLogs((prev) => [{ time, text, kind }, ...prev].slice(0, 100));
   }, []);
 
-  // ---------- WebSocket 连接 ----------
+  // ---------- WebSocket 连接（带自动重连） ----------
   useEffect(() => {
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
+    let ws: WebSocket;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
 
-    ws.onopen = () => {
-      setWsState('open');
-      wsOpenRef.current = true;
-      log(`WebSocket 通道已建立 [${WS_URL}]`, 'ok');
-    };
-    ws.onclose = () => {
-      setWsState('closed');
-      wsOpenRef.current = false;
-      log('WebSocket 连接已关闭', 'err');
-    };
-    ws.onerror = () => log('WebSocket 通信异常，请核对后端 8787 端口运行状态', 'err');
+    const connect = () => {
+      ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
 
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        let msg: any;
-        let isEcho = false;
-        try {
-          msg = JSON.parse(ev.data);
-          // 控制协议消息都有 type；若解析成功但无已知 type，视为 Echo 原样回包
-          if (!msg || typeof msg !== 'object' || !msg.type) isEcho = true;
-        } catch {
-          // 非 JSON 文本 = 任务 A 的 echo 原样回包
-          isEcho = true;
+      ws.onopen = () => {
+        reconnectRef.current = 0;
+        setWsState('open');
+        log(`WebSocket 通道已建立 [${WS_URL}]`, 'ok');
+      };
+      ws.onclose = () => {
+        setWsState('closed');
+        // 断线时重置忙状态，避免界面卡死
+        setBusy(false);
+        setStage('idle');
+        setRecording(false);
+        log('WebSocket 连接已关闭，尝试重连…', 'err');
+        // 指数退避重连：1s / 2s / 4s / 8s… 上限 10s
+        if (!disposed && !closedByUserRef.current) {
+          const delay = Math.min(1000 * 2 ** reconnectRef.current, 10000);
+          reconnectRef.current += 1;
+          reconnectTimer = setTimeout(connect, delay);
         }
-        if (isEcho) {
-          if (ev.data === echoExpectRef.current) {
-            setEchoResult(ev.data);
-            log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
-          } else {
-            log(`[Echo] 收到未知文本消息：${ev.data}`);
+      };
+      ws.onerror = () => {
+        if (ws.readyState !== WebSocket.CLOSED) log('WebSocket 通信异常，正在重试…', 'err');
+      };
+
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          let msg: any;
+          let isEcho = false;
+          try {
+            msg = JSON.parse(ev.data);
+            // 控制协议消息都有 type；若解析成功但无已知 type，视为 Echo 原样回包
+            if (!msg || typeof msg !== 'object' || !msg.type) isEcho = true;
+          } catch {
+            // 非 JSON 文本 = 任务 A 的 echo 原样回包
+            isEcho = true;
           }
-          return;
-        }
-        const now = Date.now();
-        switch (msg.type) {
-          case 'stage':
-            if (msg.stage === 'stt') {
-              setStage('stt');
-              timerRef.current.start = now;
-              log('[流程] 开始语音转写…');
-            } else if (msg.stage === 'llm') {
-              setStage('llm');
-              const cost = now - (timerRef.current.start || now);
-              timerRef.current.stt = cost;
-              setTelemetry((t) => ({ ...t, stt: cost }));
-              log(`[流程] 转写完成（${cost}ms），生成回复…`);
-            } else if (msg.stage === 'tts') {
-              setStage('tts');
-              const cost = now - (timerRef.current.start || now) - (timerRef.current.stt || 0);
-              timerRef.current.llm = cost;
-              setTelemetry((t) => ({ ...t, llm: cost }));
-              log(`[流程] 回复完成（${cost}ms），合成语音…`);
+          if (isEcho) {
+            if (ev.data === echoExpectRef.current) {
+              setEchoResult(ev.data);
+              log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
+            } else {
+              log(`[Echo] 收到未知文本消息：${ev.data}`);
             }
-            break;
-          case 'transcript':
-            setTranscript(msg.text);
-            log(`[转写] ${msg.text}`, 'ok');
-            break;
-          case 'reply':
-            setReply(msg.text);
-            log(`[回复] ${msg.text}`, 'ok');
-            break;
-          case 'audio_start':
-            audioFormatRef.current = msg.format ?? 'mp3';
-            audioChunksRef.current = [];
-            log(`[合成] 开始接收音频（${msg.format}）`);
-            break;
-          case 'audio_end': {
-            const ttsCost =
-              now - (timerRef.current.start || now) - (timerRef.current.stt || 0) - (timerRef.current.llm || 0);
-            const totalCost = now - (timerRef.current.start || now);
-            timerRef.current.tts = ttsCost;
-            setTelemetry((t) => ({ ...t, tts: ttsCost, total: totalCost }));
-            finishAudio();
-            log(`[合成] 音频接收完成，端到端耗时 ${totalCost}ms`, 'ok');
-            break;
+            return;
           }
-          case 'audio_skipped':
-            log(`[合成] 已跳过：${msg.reason}`);
-            break;
-          case 'done':
-            setBusy(false);
-            setStage('idle');
-            log('[流程] 处理完成', 'ok');
-            break;
-          case 'error':
-            log(`[错误] ${msg.message}`, 'err');
-            setBusy(false);
-            setStage('idle');
-            break;
-          default:
-            // 防御：未知 JSON 控制消息也按 Echo 展示
-            setEchoResult(ev.data);
-            log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
+          const now = Date.now();
+          switch (msg.type) {
+            case 'stage':
+              if (msg.stage === 'stt') {
+                setStage('stt');
+                timerRef.current.start = now;
+                log('[流程] 开始语音转写…');
+              } else if (msg.stage === 'llm') {
+                setStage('llm');
+                const cost = now - (timerRef.current.start || now);
+                timerRef.current.stt = cost;
+                setTelemetry((t) => ({ ...t, stt: cost }));
+                log(`[流程] 转写完成（${cost}ms），生成回复…`);
+              } else if (msg.stage === 'tts') {
+                setStage('tts');
+                const cost = now - (timerRef.current.start || now) - (timerRef.current.stt || 0);
+                timerRef.current.llm = cost;
+                setTelemetry((t) => ({ ...t, llm: cost }));
+                log(`[流程] 回复完成（${cost}ms），合成语音…`);
+              }
+              break;
+            case 'transcript':
+              setTranscript(msg.text);
+              log(`[转写] ${msg.text}`, 'ok');
+              break;
+            case 'reply':
+              setReply(msg.text);
+              log(`[回复] ${msg.text}`, 'ok');
+              break;
+            case 'audio_start':
+              audioFormatRef.current = msg.format ?? 'mp3';
+              audioChunksRef.current = [];
+              log(`[合成] 开始接收音频（${msg.format}）`);
+              break;
+            case 'audio_end': {
+              const ttsCost =
+                now - (timerRef.current.start || now) - (timerRef.current.stt || 0) - (timerRef.current.llm || 0);
+              const totalCost = now - (timerRef.current.start || now);
+              timerRef.current.tts = ttsCost;
+              setTelemetry((t) => ({ ...t, tts: ttsCost, total: totalCost }));
+              finishAudio();
+              log(`[合成] 音频接收完成，端到端耗时 ${totalCost}ms`, 'ok');
+              break;
+            }
+            case 'audio_skipped':
+              log(`[合成] 已跳过：${msg.reason}`);
+              break;
+            case 'done':
+              setBusy(false);
+              setStage('idle');
+              log('[流程] 处理完成', 'ok');
+              break;
+            case 'error':
+              log(`[错误] ${msg.message}`, 'err');
+              setBusy(false);
+              setStage('idle');
+              break;
+            default:
+              // 防御：未知 JSON 控制消息也按 Echo 展示
+              setEchoResult(ev.data);
+              log(`[Echo] 服务端原样返回：${ev.data}`, 'ok');
+          }
+        } else {
+          // 二进制帧 = TTS 音频块
+          audioChunksRef.current.push(ev.data);
         }
-      } else {
-        // 二进制帧 = TTS 音频块
-        audioChunksRef.current.push(ev.data);
-      }
+      };
     };
 
-    return () => ws.close();
+    connect();
+
+    return () => {
+      disposed = true;
+      closedByUserRef.current = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
+    };
   }, [log]);
 
   const finishAudio = () => {
@@ -292,9 +317,23 @@ export default function Home() {
 
         const wav16k = resampleTo16k(merged, audioCtx.sampleRate);
         const wavBytes = encodeWav(wav16k, 16000);
-        ws.send(JSON.stringify({ type: 'audio', mime: 'audio/wav' }));
-        ws.send(wavBytes);
-        log('音频已发送，等待处理结果…');
+        // 发送前确认连接仍在，避免对已断开的 socket 抛异常
+        const sock = wsRef.current;
+        if (!sock || sock.readyState !== WebSocket.OPEN) {
+          log('连接已断开，音频未发送（将自动重连）', 'err');
+          setBusy(false);
+          setStage('idle');
+          return;
+        }
+        try {
+          sock.send(JSON.stringify({ type: 'audio', mime: 'audio/wav' }));
+          sock.send(wavBytes);
+          log('音频已发送，等待处理结果…');
+        } catch (e) {
+          log(`发送失败：${e instanceof Error ? e.message : String(e)}`, 'err');
+          setBusy(false);
+          setStage('idle');
+        }
       }, RECORD_SECONDS * 1000);
     } catch (err) {
       log(`录音失败：${err instanceof Error ? err.message : String(err)}（请检查麦克风权限）`, 'err');

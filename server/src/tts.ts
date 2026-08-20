@@ -34,7 +34,8 @@ function generateToneWav(seconds = 1.2, freq = 440): Buffer {
  */
 export async function synthesizeStream(
   text: string,
-  onChunk: (chunk: Buffer) => void
+  onChunk: (chunk: Buffer) => void,
+  signal?: AbortSignal
 ): Promise<'sent' | 'skipped'> {
   if (env.mockAi) {
     onChunk(generateToneWav());
@@ -55,6 +56,7 @@ export async function synthesizeStream(
         model_id: env.tts.modelId,
         stream: true,
       }),
+      signal,
     }),
     15000
   );
@@ -63,10 +65,17 @@ export async function synthesizeStream(
     throw new Error(`ElevenLabs 请求失败 (${res.status}): ${detail.slice(0, 200)}`);
   }
   const reader = res.body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value && value.length > 0) onChunk(Buffer.from(value));
+  // 流式读取阶段也要熔断：ElevenLabs 中途卡住时不能永久阻塞链路
+  const readTimeout = setTimeout(() => reader.cancel('timeout').catch(() => {}), 30000);
+  try {
+    for (;;) {
+      if (signal?.aborted) throw new Error('客户端已断开连接');
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) onChunk(Buffer.from(value));
+    }
+  } finally {
+    clearTimeout(readTimeout);
   }
   return 'sent';
 }

@@ -22,10 +22,16 @@ export async function registerVoiceWs(app: FastifyInstance) {
   app.get('/ws/voice', { websocket: true }, (socket) => {
     let processing = false;
     let pendingMime = 'audio/webm';
+    // 客户端断开时中止进行中的 STT/LLM/TTS 上游请求，避免浪费调用额度
+    const abortController = new AbortController();
 
     const send = (obj: unknown) => {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(obj));
     };
+
+    socket.on('close', () => {
+      abortController.abort();
+    });
 
     socket.on('message', async (data, isBinary) => {
       // ---------- 文本帧 ----------
@@ -64,13 +70,14 @@ export async function registerVoiceWs(app: FastifyInstance) {
       processing = true;
       const requestId = Math.random().toString(36).slice(2, 10);
       try {
+        const signal = abortController.signal;
         send({ type: 'stage', stage: 'stt', requestId });
-        const text = await transcribe(Buffer.from(data as ArrayBuffer), pendingMime);
+        const text = await transcribe(Buffer.from(data as ArrayBuffer), pendingMime, signal);
         if (!text) throw new Error('未检测到清晰语音，请对着麦克风说话后再试');
         send({ type: 'transcript', text, requestId });
 
         send({ type: 'stage', stage: 'llm', requestId });
-        const reply = await chat(text);
+        const reply = await chat(text, signal);
         if (!reply) throw new Error('LLM 返回内容为空');
         send({ type: 'reply', text: reply, requestId });
 
@@ -83,7 +90,7 @@ export async function registerVoiceWs(app: FastifyInstance) {
             audioStarted = true;
           }
           if (socket.readyState === socket.OPEN) socket.send(chunk);
-        });
+        }, signal);
         if (audioStarted) {
           send({ type: 'audio_end', requestId });
         } else if (result === 'skipped') {
@@ -92,12 +99,15 @@ export async function registerVoiceWs(app: FastifyInstance) {
 
         send({ type: 'done', requestId });
       } catch (err) {
-        app.log.error(err);
-        send({
-          type: 'error',
-          message: err instanceof Error ? err.message : String(err),
-          requestId,
-        });
+        // 客户端断开导致的 abort 不需要当错误发给已断开的连接
+        if (!abortController.signal.aborted) {
+          app.log.error(err);
+          send({
+            type: 'error',
+            message: err instanceof Error ? err.message : String(err),
+            requestId,
+          });
+        }
       } finally {
         processing = false;
       }
