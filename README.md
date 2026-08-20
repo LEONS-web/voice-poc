@@ -77,3 +77,17 @@ npm run smoke
 - 消息协议分层：文本帧承载 JSON 控制消息，二进制帧承载音频数据。
 - 容错：录音期间拒绝新请求、转写为空返回明确错误、TTS 未配置时优雅降级（`audio_skipped`）。
 - 启动日志仅报告密钥是否已配置，不打印明文。
+
+## 正式项目扩展路径
+
+本 PoC 的核心链路（WebSocket 语音通道 + STT/LLM/TTS 三层）可直接作为正式产品的基础模块，向客户 12 周项目技术栈的扩展路径如下：
+
+| 正式项目技术 | 扩展方式 |
+|---|---|
+| Supabase（PostgreSQL）+ Prisma ORM | 在 `ws.ts` 的 `done` 事件后持久化会话记录与转写/回复文本；新增 Prisma schema 定义 User / VoiceSession / Feedback 表 |
+| Redis（Upstash） | 用 Redis 存储 WebSocket 会话状态（多实例共享）与请求限流；连接层已按 `processing` 串行化，天然适合接入令牌桶限流 |
+| Claude API（角色扮演） | `llm.ts` 已是独立模块，替换内部实现为 Anthropic 原生协议即可；角色扮演由 systemPrompt 参数化驱动 |
+| Stripe 订阅 | 前端接入 Stripe Checkout，WebSocket 握手阶段校验订阅状态（连接钩子中鉴权） |
+| 音频存储 | 将 TTS 音频块落盘到 S3/R2，会话结束后生成回放链接 |
+
+三层模块（`stt.ts` / `llm.ts` / `tts.ts`）均无业务耦合，可独立演进或替换实现。
