@@ -43,18 +43,21 @@ export async function synthesizeStream(
   if (!env.tts.apiKey) return 'skipped';
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${env.tts.voiceId}/stream?output_format=mp3_44100_128`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'xi-api-key': env.tts.apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      text,
-      model_id: env.tts.modelId,
-      stream: true,
+  const res = await withTimeout(
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': env.tts.apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text,
+        model_id: env.tts.modelId,
+        stream: true,
+      }),
     }),
-  });
+    15000
+  );
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '');
     throw new Error(`ElevenLabs 请求失败 (${res.status}): ${detail.slice(0, 200)}`);
@@ -66,4 +69,15 @@ export async function synthesizeStream(
     if (value && value.length > 0) onChunk(Buffer.from(value));
   }
   return 'sent';
+}
+
+/** 超时熔断：ElevenLabs 偶发卡顿时抛错，避免 WebSocket 链路永久阻塞 */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`ElevenLabs 请求超时（${ms}ms）`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }

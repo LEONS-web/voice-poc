@@ -7,6 +7,8 @@ const RECORD_SECONDS = 3;
 
 type LogLine = { time: string; text: string; kind?: 'err' | 'ok' };
 
+type Telemetry = { stt?: number; llm?: number; tts?: number; total?: number };
+
 // ---------- 录音编码工具：webm → 16kHz 单声道 WAV ----------
 // 百炼 Qwen-ASR 对 WAV 格式支持最稳定；浏览器 MediaRecorder 输出 webm，
 // 这里用 Web Audio API 解码后重新编码为 WAV，保证服务端识别兼容性。
@@ -62,22 +64,33 @@ async function blobToWav(blob: Blob): Promise<Blob | null> {
 }
 
 export default function Home() {
+  const [activeTab, setActiveTab] = useState<'voice' | 'echo'>('voice');
   const [wsState, setWsState] = useState<'connecting' | 'open' | 'closed'>('closed');
-  const [echoInput, setEchoInput] = useState('你好，这是一条 WebSocket 测试消息');
+
+  // 任务 A：Echo
+  const [echoInput, setEchoInput] = useState('Fastify WebSocket Echo 连通性测试验证');
   const [echoResult, setEchoResult] = useState('');
+
+  // 任务 B/C：语音
   const [recording, setRecording] = useState(false);
+  const [countdown, setCountdown] = useState(RECORD_SECONDS);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [reply, setReply] = useState('');
   const [audioUrl, setAudioUrl] = useState('');
-  const [stage, setStage] = useState('');
+  const [stage, setStage] = useState<'idle' | 'recording' | 'stt' | 'llm' | 'tts'>('idle');
   const [logs, setLogs] = useState<LogLine[]>([]);
+
+  // Telemetry 性能耗时指标
+  const [telemetry, setTelemetry] = useState<Telemetry>({});
+  const timerRef = useRef<{ start?: number; stt?: number; llm?: number; tts?: number }>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
   const audioFormatRef = useRef('mp3');
   const echoExpectRef = useRef('');
+  const wsOpenRef = useRef(false);
 
   const log = useCallback((text: string, kind?: 'err' | 'ok') => {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -91,67 +104,98 @@ export default function Home() {
 
     ws.onopen = () => {
       setWsState('open');
-      log(`已连接 ${WS_URL}`, 'ok');
+      wsOpenRef.current = true;
+      log(`WebSocket 通道已建立 [${WS_URL}]`, 'ok');
     };
     ws.onclose = () => {
       setWsState('closed');
-      log('连接已断开', 'err');
+      wsOpenRef.current = false;
+      log('WebSocket 连接已关闭', 'err');
     };
-    ws.onerror = () => log('WebSocket 出错（确认后端 8787 端口已启动）', 'err');
+    ws.onerror = () => log('WebSocket 通信异常，请核对后端 8787 端口运行状态', 'err');
 
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
         let msg: any;
+        let isEcho = false;
         try {
           msg = JSON.parse(ev.data);
+          // 控制协议消息都有 type；若解析成功但无已知 type，视为 Echo 原样回包
+          if (!msg || typeof msg !== 'object' || !msg.type) isEcho = true;
         } catch {
           // 非 JSON 文本 = 任务 A 的 echo 原样回包
+          isEcho = true;
+        }
+        if (isEcho) {
           if (ev.data === echoExpectRef.current) {
             setEchoResult(ev.data);
-            log('[Echo] 服务端原样返回，内容一致', 'ok');
+            log(`[Echo 响应] 服务端原样回显: "${ev.data}"`, 'ok');
           } else {
-            log(`收到未知文本消息：${ev.data}`);
+            log(`[Echo] 收到未知文本消息：${ev.data}`);
           }
           return;
         }
+        const now = Date.now();
         switch (msg.type) {
+          case 'stage':
+            if (msg.stage === 'stt') {
+              setStage('stt');
+              timerRef.current.start = now;
+              log('[Pipeline] 启动语音转写 (Whisper STT)...');
+            } else if (msg.stage === 'llm') {
+              setStage('llm');
+              const cost = now - (timerRef.current.start || now);
+              timerRef.current.stt = cost;
+              setTelemetry((t) => ({ ...t, stt: cost }));
+              log(`[Pipeline] STT 完成 (${cost}ms)，进入智能推理 (LLM)...`);
+            } else if (msg.stage === 'tts') {
+              setStage('tts');
+              const cost = now - (timerRef.current.start || now) - (timerRef.current.stt || 0);
+              timerRef.current.llm = cost;
+              setTelemetry((t) => ({ ...t, llm: cost }));
+              log(`[Pipeline] LLM 完成 (${cost}ms)，进入流式语音合成 (ElevenLabs)...`);
+            }
+            break;
           case 'transcript':
             setTranscript(msg.text);
-            log(`[STT] 转写结果：${msg.text}`, 'ok');
+            log(`[转写结果] "${msg.text}"`, 'ok');
             break;
           case 'reply':
             setReply(msg.text);
-            log(`[LLM] 回复：${msg.text}`, 'ok');
-            break;
-          case 'stage':
-            setStage(msg.stage);
-            log(`阶段：${msg.stage}`);
+            log(`[LLM 回复] "${msg.text}"`, 'ok');
             break;
           case 'audio_start':
             audioFormatRef.current = msg.format ?? 'mp3';
             audioChunksRef.current = [];
-            log(`[TTS] 开始接收流式音频（${msg.format}）`);
+            log(`[TTS 传输] 接收流式音频分块 (${msg.format})`);
             break;
-          case 'audio_end':
+          case 'audio_end': {
+            const ttsCost =
+              now - (timerRef.current.start || now) - (timerRef.current.stt || 0) - (timerRef.current.llm || 0);
+            const totalCost = now - (timerRef.current.start || now);
+            timerRef.current.tts = ttsCost;
+            setTelemetry((t) => ({ ...t, tts: ttsCost, total: totalCost }));
             finishAudio();
-            log('[TTS] 音频接收完成', 'ok');
+            log(`[TTS 完成] 全链路耗时 ${totalCost}ms`, 'ok');
             break;
+          }
           case 'audio_skipped':
-            log(`[TTS] 跳过：${msg.reason}`);
+            log(`[TTS 跳过] ${msg.reason}`);
             break;
           case 'done':
             setBusy(false);
-            setStage('');
-            log('管线执行完成', 'ok');
-            break;
-          case 'pong':
-            log('收到 pong', 'ok');
+            setStage('idle');
+            log('[Pipeline] 会话完成', 'ok');
             break;
           case 'error':
-            log(`服务端错误：${msg.message}`, 'err');
+            log(`[服务端报错] ${msg.message}`, 'err');
             setBusy(false);
-            setStage('');
+            setStage('idle');
             break;
+          default:
+            // 防御：未知 JSON 控制消息也按 Echo 展示
+            setEchoResult(ev.data);
+            log(`[Echo 响应] ${ev.data}`, 'ok');
         }
       } else {
         // 二进制帧 = TTS 音频块
@@ -177,18 +221,23 @@ export default function Home() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     echoExpectRef.current = echoInput;
     ws.send(echoInput);
-    log(`[Echo] 已发送：${echoInput}`);
+    setEchoResult('');
+    log(`[Echo 发送] "${echoInput}"`);
   };
 
   // ---------- 任务 B：录音 3 秒 → STT → LLM（→ TTS） ----------
   const startVoice = async () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || busy) return;
+
     setBusy(true);
     setTranscript('');
     setReply('');
     setAudioUrl('');
     setStage('recording');
+    setCountdown(RECORD_SECONDS);
+    setTelemetry({});
+    timerRef.current = {};
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -200,7 +249,14 @@ export default function Home() {
 
       recorder.start();
       setRecording(true);
-      log(`开始录音（${RECORD_SECONDS} 秒，格式 ${mime || '默认'}）`);
+      log(`[麦克风] 开启录音 (${RECORD_SECONDS} 秒倒计时)...`);
+
+      let remain = RECORD_SECONDS;
+      const timer = setInterval(() => {
+        remain -= 1;
+        if (remain >= 0) setCountdown(remain);
+        if (remain <= 0) clearInterval(timer);
+      }, 1000);
 
       setTimeout(() => {
         recorder.stop();
@@ -208,100 +264,229 @@ export default function Home() {
         recorder.onstop = async () => {
           stream.getTracks().forEach((t) => t.stop());
           const blob = new Blob(chunks, { type: mime || 'audio/webm' });
-          log(`录音完成，大小 ${blob.size} 字节`);
-          // 转成 16kHz WAV 再发送（识别兼容性最佳），失败则降级发原始格式
+          log(`[麦克风] 录音捕获 ${(blob.size / 1024).toFixed(1)} KB，转码 16kHz WAV...`);
+
           const wav = await blobToWav(blob);
           const payload = wav ?? blob;
           const payloadMime = wav ? 'audio/wav' : mime || 'audio/webm';
-          log(`已转换为 ${payloadMime}（${payload.size} 字节），发送到后端`);
+
           ws.send(JSON.stringify({ type: 'audio', mime: payloadMime }));
           ws.send(await payload.arrayBuffer());
+          log(`[WebSocket] 音频载荷发送完成，等待全链路响应...`);
         };
       }, RECORD_SECONDS * 1000);
     } catch (err) {
-      log(`录音失败：${err instanceof Error ? err.message : String(err)}（请检查麦克风权限）`, 'err');
+      log(`录音异常: ${err instanceof Error ? err.message : String(err)}（请检查麦克风权限）`, 'err');
       setBusy(false);
-      setStage('');
+      setStage('idle');
     }
   };
 
-  const stageLabel: Record<string, string> = {
-    recording: '正在录音…',
-    stt: 'Whisper 转写中…',
-    llm: 'LLM 生成回复中…',
-    tts: 'ElevenLabs 合成语音中…',
-  };
-
   return (
-    <main>
-      <h1>语音 AI 链路 PoC</h1>
-      <p className="subtitle">
-        Next.js 14 · Fastify · WebSocket · Whisper STT · LLM · ElevenLabs 流式 TTS
-      </p>
-
-      <div className="card">
-        <h2>
-          连接状态
-          <span className={`pill ${wsState === 'open' ? 'ok' : ''}`}>
-            {wsState === 'open' ? '已连接' : wsState === 'connecting' ? '连接中' : '未连接'}
+    <div className="app-shell">
+      {/* 顶部 Header */}
+      <header className="app-header">
+        <div className="brand-wrapper">
+          <div className="brand-badge-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="22" />
+            </svg>
+          </div>
+          <div>
+            <span className="brand-text">AuraVoice Studio</span>
+            <span className="brand-sub">PoC Milestone</span>
+          </div>
+        </div>
+        <div className="conn-pill" role="status" aria-live="polite">
+          <span className={`conn-dot ${wsState === 'open' ? 'active' : ''}`} />
+          <span>
+            {wsState === 'open' ? 'WS 8787 Connected' : wsState === 'connecting' ? 'Connecting...' : 'Offline'}
           </span>
-        </h2>
-        <p className="status">服务端地址：{WS_URL}（可用环境变量 NEXT_PUBLIC_WS_URL 覆盖）</p>
-      </div>
-
-      <div className="card">
-        <h2>任务 A · WebSocket Echo<span className="tag">验证 WebSocket</span></h2>
-        <div className="row">
-          <input
-            type="text"
-            value={echoInput}
-            onChange={(e) => setEchoInput(e.target.value)}
-            placeholder="输入一段文本"
-          />
-          <button onClick={sendEcho} disabled={wsState !== 'open'}>发送并回显</button>
         </div>
-        {echoResult && (
-          <div className="result">
-            <span className="label">服务端原样返回</span>
-            {echoResult}
-          </div>
-        )}
-      </div>
+      </header>
 
-      <div className="card">
-        <h2>任务 B / C · 语音对话<span className="tag">录音 3 秒 → Whisper → LLM → TTS</span></h2>
-        <div className="row">
-          <button onClick={startVoice} disabled={wsState !== 'open' || busy}>
-            {recording ? '录音中…' : busy ? '处理中…' : `开始录音（${RECORD_SECONDS} 秒）`}
-          </button>
-          {stage && <span className={`pill ${recording ? 'rec' : ''}`}>{stageLabel[stage] ?? stage}</span>}
-        </div>
-        {transcript && (
-          <div className="result">
-            <span className="label">Whisper 转写</span>
-            {transcript}
-          </div>
-        )}
-        {reply && (
-          <div className="result">
-            <span className="label">LLM 回复</span>
-            {reply}
-          </div>
-        )}
-        {audioUrl && <audio controls autoPlay src={audioUrl} />}
-      </div>
+      {/* 模式切换 Tabs */}
+      <nav className="nav-tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={activeTab === 'voice'}
+          className={`nav-tab ${activeTab === 'voice' ? 'selected' : ''}`}
+          onClick={() => setActiveTab('voice')}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          </svg>
+          <span>任务 B & C · 语音 AI 链路</span>
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === 'echo'}
+          className={`nav-tab ${activeTab === 'echo' ? 'selected' : ''}`}
+          onClick={() => setActiveTab('echo')}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+          <span>任务 A · WebSocket Echo</span>
+        </button>
+      </nav>
 
-      <div className="card">
-        <h2>运行日志</h2>
-        <div className="log">
-          {logs.map((l, i) => (
-            <div key={i} className={l.kind}>
-              <span className="t">{l.time}</span>
-              {l.text}
+      {/* 任务 B/C 主面板 */}
+      {activeTab === 'voice' && (
+        <section className="studio-card" aria-label="语音对话面板">
+          <div className="acoustic-stage">
+            <div className="orb-container">
+              {recording && <div className="sonic-ripple" />}
+              <button
+                className={`orb-btn ${recording ? 'recording' : busy ? 'processing' : ''}`}
+                onClick={startVoice}
+                disabled={wsState !== 'open' || busy}
+                aria-label={recording ? '录音中' : '开始 3 秒语音对话'}
+                title="点击开始录音 3 秒"
+              >
+                {recording ? (
+                  <span style={{ fontSize: '18px', fontWeight: 'bold', fontFamily: 'var(--font-mono)' }}>
+                    {countdown}s
+                  </span>
+                ) : busy ? (
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 2s linear infinite' }}>
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                ) : (
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                  </svg>
+                )}
+              </button>
             </div>
-          ))}
+            <div className="pipeline-status" aria-live="polite">
+              <div className="pipeline-status-title">
+                {stage === 'recording' && '麦克风监听中 · 请说话'}
+                {stage === 'stt' && 'Whisper 正在转写音频流 (STT)...'}
+                {stage === 'llm' && 'Claude/LLM 正在生成回复...'}
+                {stage === 'tts' && 'ElevenLabs 正在流式合成语音 (TTS)...'}
+                {stage === 'idle' && (transcript ? '对话已就绪 · 点击可继续' : '点击声学球开启 3 秒全链路对话')}
+              </div>
+              <div className="pipeline-status-desc">16kHz 单声道 WAV 编码 · 实时 WebSocket 二进制分发</div>
+            </div>
+          </div>
+
+          {/* 对话历史流 */}
+          {(transcript || reply) && (
+            <div className="conversation-ledger">
+              {transcript && (
+                <article className="message-card user">
+                  <div className="avatar-badge user-badge">YOU</div>
+                  <div className="message-body">
+                    <div className="message-meta">
+                      <span className="message-sender">用户语音转写</span>
+                      <span className="message-tag">Whisper ASR</span>
+                    </div>
+                    <p className="message-text">{transcript}</p>
+                  </div>
+                </article>
+              )}
+              {reply && (
+                <article className="message-card assistant">
+                  <div className="avatar-badge ai-badge">AI</div>
+                  <div className="message-body">
+                    <div className="message-meta">
+                      <span className="message-sender">智能语音回复</span>
+                      <span className="message-tag">LLM + ElevenLabs TTS</span>
+                    </div>
+                    <p className="message-text">{reply}</p>
+                    {audioUrl && (
+                      <div style={{ marginTop: '12px' }}>
+                        <audio controls autoPlay src={audioUrl} style={{ width: '100%', height: '34px' }} />
+                      </div>
+                    )}
+                  </div>
+                </article>
+              )}
+            </div>
+          )}
+
+          {/* 延迟指标 Telemetry */}
+          {telemetry.total !== undefined && (
+            <div className="telemetry-strip" aria-label="延迟性能看板">
+              <div className="telemetry-col">
+                <span className="telemetry-label">STT 耗时</span>
+                <span className="telemetry-value">{telemetry.stt ?? '-'} ms</span>
+              </div>
+              <div className="telemetry-col">
+                <span className="telemetry-label">LLM 耗时</span>
+                <span className="telemetry-value">{telemetry.llm ?? '-'} ms</span>
+              </div>
+              <div className="telemetry-col">
+                <span className="telemetry-label">TTS 耗时</span>
+                <span className="telemetry-value">{telemetry.tts ?? '-'} ms</span>
+              </div>
+              <div className="telemetry-col">
+                <span className="telemetry-label">端到端延迟</span>
+                <span className="telemetry-value" style={{ color: 'var(--success)' }}>{telemetry.total} ms</span>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* 任务 A Echo 面板 */}
+      {activeTab === 'echo' && (
+        <section className="studio-card" aria-label="Echo 服务诊断">
+          <h2 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px' }}>任务 A · WebSocket 原样回显测试</h2>
+          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+            通过 <code>/ws/voice</code> 文本信道进行全双工 Ping-Pong 与 Echo 传输校验。
+          </p>
+          <div className="echo-pane">
+            <input
+              type="text"
+              className="text-field"
+              value={echoInput}
+              onChange={(e) => setEchoInput(e.target.value)}
+              placeholder="输入测试文本..."
+            />
+            <button className="action-btn" onClick={sendEcho} disabled={wsState !== 'open'}>
+              发送并断言
+            </button>
+          </div>
+          {echoResult && (
+            <div className="message-card" style={{ marginTop: '16px' }}>
+              <div className="message-body">
+                <div className="message-meta">
+                  <span className="message-sender">服务端返回内容</span>
+                  <span className="message-tag" style={{ color: 'var(--success)' }}>PASS 匹配</span>
+                </div>
+                <div className="message-text" style={{ fontFamily: 'var(--font-mono)' }}>{echoResult}</div>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* 底部 Telemetry 日志 */}
+      <footer className="terminal-block">
+        <div className="terminal-header">
+          <span className="terminal-title">实时工程事件日志 (Telemetry Feed)</span>
+          <span style={{ fontSize: '11px', color: '#475569' }}>{logs.length} 帧事件</span>
         </div>
-      </div>
-    </main>
+        <div className="terminal-feed">
+          {logs.length === 0 ? (
+            <div style={{ color: '#475569' }}>等待连接建立与交互载荷...</div>
+          ) : (
+            logs.map((l, i) => (
+              <div key={i} className="feed-row">
+                <span className="feed-time">[{l.time}]</span>
+                <span className={`feed-content ${l.kind || ''}`}>{l.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </footer>
+    </div>
   );
 }
