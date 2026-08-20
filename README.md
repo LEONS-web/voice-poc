@@ -66,13 +66,16 @@ npm run smoke
 | 变量 | 说明 |
 |---|---|
 | `MOCK_AI` | `1`=模拟模式（无需密钥，STT/LLM 返回模拟数据，TTS 生成提示音）；`0`=真实链路 |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI 兼容的 LLM 服务（DeepSeek / OpenAI / Moonshot 等） |
-| `WHISPER_BASE_URL` / `WHISPER_API_KEY` / `WHISPER_MODEL` | Whisper 转写服务（Groq 免费档 / OpenAI 官方） |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI 兼容的 LLM 服务（阿里云百炼 / DeepSeek / OpenAI / Moonshot 等） |
+| `STT_PROVIDER` | `openai`=标准 Whisper 接口（Groq / OpenAI）；`qwen-asr`=百炼 Qwen-ASR |
+| `WHISPER_BASE_URL` / `WHISPER_API_KEY` / `WHISPER_MODEL` | 语音转写服务（与 STT_PROVIDER 配套） |
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` | ElevenLabs TTS（可选，未配置时任务 C 自动跳过） |
 
 ## 设计要点
 
 - **LLM 层采用 OpenAI 兼容协议抽象**：切换服务商只需改环境变量，不改代码；如需 Anthropic 原生协议仅替换 `llm.ts` 内部实现
+- **STT 双协议适配**：同时支持标准 Whisper transcriptions 接口与百炼 Qwen-ASR（chat completions + input_audio），通过 `STT_PROVIDER` 切换
+- **前端录音格式统一**：浏览器 MediaRecorder 输出 webm，前端用 Web Audio API 解码后重新编码为 16kHz 单声道 WAV 再发送，确保 STT 兼容性并压缩体积（零额外依赖）
 - **消息协议清晰分层**：文本帧走 JSON 控制消息，二进制帧走音频数据，前后端解耦
 - **容错**：录音期间拒绝新请求、转写为空报错、TTS 未配置优雅降级，错误经 `error` 消息回传前端
 - **日志不泄露密钥**：启动日志只报告密钥"是否已配置"，不打印明文

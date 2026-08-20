@@ -7,6 +7,60 @@ const RECORD_SECONDS = 3;
 
 type LogLine = { time: string; text: string; kind?: 'err' | 'ok' };
 
+// ---------- 录音编码工具：webm → 16kHz 单声道 WAV ----------
+// 百炼 Qwen-ASR 对 WAV 格式支持最稳定；浏览器 MediaRecorder 输出 webm，
+// 这里用 Web Audio API 解码后重新编码为 WAV，保证服务端识别兼容性。
+function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  return buf;
+}
+
+async function blobToWav(blob: Blob): Promise<Blob | null> {
+  try {
+    const arrayBuf = await blob.arrayBuffer();
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const decoded = await ctx.decodeAudioData(arrayBuf);
+    await ctx.close();
+    // 混音为单声道
+    const ch0 = decoded.getChannelData(0);
+    const mono =
+      decoded.numberOfChannels === 1
+        ? ch0
+        : (() => {
+            const out = new Float32Array(decoded.length);
+            for (let c = 0; c < decoded.numberOfChannels; c++) {
+              const d = decoded.getChannelData(c);
+              for (let i = 0; i < d.length; i++) out[i] += d[i] / decoded.numberOfChannels;
+            }
+            return out;
+          })();
+    return new Blob([encodeWav(mono, decoded.sampleRate)], { type: 'audio/wav' });
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [wsState, setWsState] = useState<'connecting' | 'open' | 'closed'>('closed');
   const [echoInput, setEchoInput] = useState('你好，这是一条 WebSocket 测试消息');
@@ -151,12 +205,17 @@ export default function Home() {
       setTimeout(() => {
         recorder.stop();
         setRecording(false);
-        recorder.onstop = () => {
+        recorder.onstop = async () => {
           stream.getTracks().forEach((t) => t.stop());
           const blob = new Blob(chunks, { type: mime || 'audio/webm' });
-          log(`录音完成，大小 ${blob.size} 字节，发送到后端`);
-          ws.send(JSON.stringify({ type: 'audio', mime: mime || 'audio/webm' }));
-          blob.arrayBuffer().then((buf) => ws.send(buf));
+          log(`录音完成，大小 ${blob.size} 字节`);
+          // 转成 16kHz WAV 再发送（识别兼容性最佳），失败则降级发原始格式
+          const wav = await blobToWav(blob);
+          const payload = wav ?? blob;
+          const payloadMime = wav ? 'audio/wav' : mime || 'audio/webm';
+          log(`已转换为 ${payloadMime}（${payload.size} 字节），发送到后端`);
+          ws.send(JSON.stringify({ type: 'audio', mime: payloadMime }));
+          ws.send(await payload.arrayBuffer());
         };
       }, RECORD_SECONDS * 1000);
     } catch (err) {
