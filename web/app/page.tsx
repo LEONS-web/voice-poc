@@ -667,7 +667,7 @@ export default function Home() {
         </div>
         <div className={`terminal-feed ${logsCollapsed ? 'collapsed' : ''}`}>
           {logs.length === 0 ? (
-            <div style={{ color: '#475569' }}>暂无日志</div>
+            <div style={{ color: 'var(--text-dim)' }}>暂无日志</div>
           ) : (
             logs.map((l, i) => (
               <div key={i} className="feed-row">
