@@ -10,3 +10,6 @@ build/
 .env.*.local
 .DS_Store
 Thumbs.db
+.workbuddy/
+AGENTS.md
+PROJECT_PROGRESS.md
